@@ -11,7 +11,7 @@ import { parseOSMXmlFile } from './server/osmXmlParser';
 import { DatasetStatus, PBFParseStats, OSMPlace } from './server/types';
 import {
   getStoredPlacesCount,
-  loadAllPlacesFromDb,
+  getPlacesByBbox,
   savePlacesToDb,
   getDbStats,
 } from './src/db/osmPlaces.ts';
@@ -65,7 +65,7 @@ const chunkUpload = multer({
 
 // Initialize Spatial Index with default Vietnam places
 const defaultPlaces = getDefaultVietnamPlaces();
-const spatialIndex = new SpatialIndex(defaultPlaces);
+const spatialIndex = new SpatialIndex();
 
 let datasetStatus: DatasetStatus = {
   sourceName: 'Vietnam Administrative Hierarchy (Default Dataset)',
@@ -167,22 +167,54 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     service: 'OSM Vietnam Hierarchy & Reverse Geocoder',
     version: '1.0.0',
-    indexedPlaces: spatialIndex.size(),
+    indexedPlaces: 0,
+    storageMode: 'postgres_viewport_query',
   });
 });
 
 // Current dataset status and metadata
-app.get('/api/status', (_req, res) => {
-  updateDatasetStats();
-  res.json({
-    success: true,
-    data: datasetStatus,
-  });
+app.get('/api/status', async (_req, res) => {
+  const dbStats = await getDbStats();
+  datasetStatus.database = dbStats;
+  if (dbStats.connected) {
+    datasetStatus.stats.totalEntities = dbStats.totalPlaces;
+    datasetStatus.sourceName = 'PostgreSQL Database (viewport queries)';
+    datasetStatus.sourceType = 'postgres';
+  }
+  res.json({ success: true, data: datasetStatus });
 });
+
+async function getLookupCandidates(lat: number, lon: number, nearbyMeters: number, buildingMeters: number) {
+  const metersToLat = (meters: number) => meters / 111139;
+  const metersToLon = (meters: number) => meters / (111139 * Math.max(Math.cos(lat * Math.PI / 180), 0.1));
+
+  // This query cannot be truncated by the density of surrounding buildings: every
+  // polygon whose bbox contains the exact point is always checked geometrically.
+  const containingBbox = getPlacesByBbox({
+    minLon: lon, minLat: lat, maxLon: lon, maxLat: lat, limit: 10000,
+  });
+
+  const nearbyRadius = Math.max(nearbyMeters, 1);
+  const nearby = getPlacesByBbox({
+    minLon: lon - metersToLon(nearbyRadius), minLat: lat - metersToLat(nearbyRadius),
+    maxLon: lon + metersToLon(nearbyRadius), maxLat: lat + metersToLat(nearbyRadius),
+    adminLevels: ['poi'], limit: 2000, orderFrom: { lon, lat },
+  });
+
+  const buildingRadius = Math.max(buildingMeters, 1);
+  const buildings = getPlacesByBbox({
+    minLon: lon - metersToLon(buildingRadius), minLat: lat - metersToLat(buildingRadius),
+    maxLon: lon + metersToLon(buildingRadius), maxLat: lat + metersToLat(buildingRadius),
+    adminLevels: ['building'], limit: 3000, orderFrom: { lon, lat },
+  });
+
+  const groups = await Promise.all([containingBbox, nearby, buildings]);
+  return [...new Map(groups.flat().map((place) => [place.id, place])).values()];
+}
 
 // PRIMARY ENDPOINT: Coordinate Reverse Geocoding & Administrative Hierarchy Lookup
 // GET /api/lookup?lat=10.7725&lon=106.6983&order=narrow_to_broad
-app.get('/api/lookup', (req, res) => {
+app.get('/api/lookup', async (req, res) => {
   const latStr = (req.query.lat as string) || '';
   const lonStr = (req.query.lon || req.query.lng) as string || '';
   const order =
@@ -213,24 +245,21 @@ app.get('/api/lookup', (req, res) => {
     return;
   }
 
-  const result = spatialIndex.query(
-    lat,
-    lon,
-    order,
-    isNaN(maxDistance) ? 150 : maxDistance,
-    !onlyContaining && includeNearby,
-    fallbackBuilding,
-    isNaN(maxBuildingDist) ? 2000 : maxBuildingDist
-  );
-  res.json({
-    success: true,
-    data: result,
-  });
+  try {
+    const candidates = await getLookupCandidates(
+      lat, lon, isNaN(maxDistance) ? 150 : maxDistance, isNaN(maxBuildingDist) ? 2000 : maxBuildingDist
+    );
+    const result = new SpatialIndex(candidates).query(lat, lon, order, isNaN(maxDistance) ? 150 : maxDistance,
+      !onlyContaining && includeNearby, fallbackBuilding, isNaN(maxBuildingDist) ? 2000 : maxBuildingDist);
+    res.json({ success: true, data: result });
+  } catch (error: any) {
+    res.status(503).json({ success: false, error: `Không thể truy vấn PostgreSQL: ${error.message}` });
+  }
 });
 
 // POST /api/lookup
 // Body: { lat: 21.0287, lon: 105.8524, order?: "narrow_to_broad" | "broad_to_narrow", include_nearby?: boolean, max_distance?: number, fallback_nearest_building?: boolean, max_building_distance?: number }
-app.post('/api/lookup', (req, res) => {
+app.post('/api/lookup', async (req, res) => {
   const { lat, lon, lng, order, max_distance, include_nearby, only_containing, fallback_nearest_building, max_building_distance } = req.body;
   const targetLon = lon !== undefined ? lon : lng;
 
@@ -251,27 +280,39 @@ app.post('/api/lookup', (req, res) => {
   const incNearby = only_containing ? false : include_nearby !== false;
   const fallbackBuilding = fallback_nearest_building !== false;
 
-  const result = spatialIndex.query(
-    latNum,
-    lonNum,
-    sortOrder,
-    isNaN(maxDistance) ? 150 : maxDistance,
-    incNearby,
-    fallbackBuilding,
-    isNaN(maxBuildingDist) ? 2000 : maxBuildingDist
-  );
-
-  res.json({
-    success: true,
-    data: result,
-  });
+  try {
+    const candidates = await getLookupCandidates(
+      latNum, lonNum, isNaN(maxDistance) ? 150 : maxDistance, isNaN(maxBuildingDist) ? 2000 : maxBuildingDist
+    );
+    const result = new SpatialIndex(candidates).query(latNum, lonNum, sortOrder, isNaN(maxDistance) ? 150 : maxDistance,
+      incNearby, fallbackBuilding, isNaN(maxBuildingDist) ? 2000 : maxBuildingDist);
+    res.json({ success: true, data: result });
+  } catch (error: any) {
+    res.status(503).json({ success: false, error: `Không thể truy vấn PostgreSQL: ${error.message}` });
+  }
 });
 
 // GET /api/layers - Export GeoJSON features of all indexed places for map visualization
-app.get('/api/layers', (req, res) => {
-  const levelFilter = req.query.admin_level as string | undefined;
-  const geojson = spatialIndex.toGeoJSON(levelFilter);
-  res.json(geojson);
+app.get('/api/layers', async (req, res) => {
+  const minLon = Number(req.query.min_lon), minLat = Number(req.query.min_lat);
+  const maxLon = Number(req.query.max_lon), maxLat = Number(req.query.max_lat);
+  const zoom = Math.max(0, Math.min(20, Number(req.query.zoom)));
+  if (![minLon, minLat, maxLon, maxLat, zoom].every(Number.isFinite) || minLon >= maxLon || minLat >= maxLat) {
+    return res.status(400).json({ success: false, error: 'Cần bbox hợp lệ: min_lon, min_lat, max_lon, max_lat và zoom.' });
+  }
+  const adminLevels = zoom < 7 ? ['2', '3', '4'] : zoom < 10 ? ['4', '5', '6']
+    : zoom < 14 ? ['6', '7', '8'] : zoom < 16 ? ['8', '9', '10', 'street']
+    : ['8', '9', '10', 'street', 'building', 'poi'];
+  try {
+    const places = await getPlacesByBbox({ minLon, minLat, maxLon, maxLat, adminLevels, limit: zoom >= 16 ? 8000 : 4000 });
+    res.set('Cache-Control', 'private, max-age=15');
+    res.json({ type: 'FeatureCollection', zoom, count: places.length, features: places.map((place) => ({
+      type: 'Feature', properties: { ...place, geometry: undefined },
+      geometry: { type: place.geometryType, coordinates: place.geometry.coordinates },
+    })) });
+  } catch (error: any) {
+    res.status(503).json({ success: false, error: `Không thể truy vấn PostgreSQL: ${error.message}` });
+  }
 });
 
 function mergeUploadedPlacesWithAdminHierarchy(
@@ -303,7 +344,6 @@ function mergeUploadedPlacesWithAdminHierarchy(
     combinedPlaces.push(...defaultPlaces.filter((p) => p.adminLevel === 8));
   }
 
-  spatialIndex.setPlaces(combinedPlaces);
 
   // Persist imported places asynchronously to PostgreSQL for durable storage across restarts
   savePlacesToDb(combinedPlaces, 'import', originalName, fileSize)
@@ -602,7 +642,6 @@ app.post('/api/upload-chunk', chunkUpload.single('chunk'), async (req, res) => {
 // POST /api/reset-default - Reset to default Vietnam dataset
 app.post('/api/reset-default', (_req, res) => {
   const freshPlaces = getDefaultVietnamPlaces();
-  spatialIndex.setPlaces(freshPlaces);
   datasetStatus = {
     sourceName: 'Vietnam Administrative Hierarchy (Default Dataset)',
     sourceType: 'default_vietnam',
@@ -762,7 +801,6 @@ app.post(['/api/import-pbf-url', '/api/import-osm-url'], async (req, res) => {
     datasetStatus.lastParseStats = stats;
 
     if (places.length > 0) {
-      spatialIndex.setPlaces(places);
 
       // Persist downloaded places to PostgreSQL
       savePlacesToDb(places, 'url_import', displayName, fileStats.size)
@@ -861,7 +899,8 @@ app.get('/api/database/status', async (_req, res) => {
     res.json({
       success: true,
       data: stats,
-      inMemoryIndexed: spatialIndex.getPlaces().length,
+      inMemoryIndexed: 0,
+      queryMode: 'viewport',
     });
   } catch (err: any) {
     res.status(500).json({
@@ -871,46 +910,22 @@ app.get('/api/database/status', async (_req, res) => {
   }
 });
 
-// POST /api/database/reload - Force reload all stored places from Postgres into in-memory spatial index
+// POST /api/database/reload - Refresh metadata only; map data remains request-scoped.
 app.post('/api/database/reload', async (_req, res) => {
   try {
-    const dbPlaces = await loadAllPlacesFromDb();
-    if (dbPlaces.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Database chưa có địa điểm nào được lưu.',
-      });
-    }
-
-    spatialIndex.setPlaces(dbPlaces);
     const dbStats = await getDbStats();
-    datasetStatus = {
-      sourceName: 'PostgreSQL Database (Cloud SQL)',
-      sourceType: 'postgres',
-      uploadedAt: new Date().toISOString(),
-      stats: {
-        totalEntities: dbPlaces.length,
-        buildings: dbPlaces.filter((p) => p.placeType === 'building' || p.adminLevel === 'building').length,
-        countries: dbPlaces.filter((p) => p.adminLevel === 2).length,
-        provinces: dbPlaces.filter((p) => p.adminLevel === 4).length,
-        districts: dbPlaces.filter((p) => p.adminLevel === 6).length,
-        wards: dbPlaces.filter((p) => p.adminLevel === 8).length,
-        pois: dbPlaces.filter((p) => p.adminLevel === 'poi' || p.placeType === 'poi').length,
-      },
-      sampleCoordinates: datasetStatus.sampleCoordinates,
-      database: dbStats,
-    };
-
-    res.json({
-      success: true,
-      message: `Đã nạp lại thành công ${dbPlaces.length} địa điểm từ PostgreSQL!`,
-      dataset: datasetStatus,
-    });
+    if (!dbStats.connected || dbStats.totalPlaces === 0) {
+      return res.status(400).json({ success: false, error: 'Database chưa có địa điểm nào được lưu.' });
+    }
+    spatialIndex.clear();
+    datasetStatus.sourceName = 'PostgreSQL Database (viewport queries)';
+    datasetStatus.sourceType = 'postgres';
+    datasetStatus.uploadedAt = new Date().toISOString();
+    datasetStatus.stats.totalEntities = dbStats.totalPlaces;
+    datasetStatus.database = dbStats;
+    res.json({ success: true, message: 'Đã làm mới kết nối PostgreSQL; dữ liệu sẽ được truy vấn theo khung bản đồ.', dataset: datasetStatus });
   } catch (err: any) {
-    res.status(500).json({
-      success: false,
-      error: err.message || 'Lỗi khi nạp dữ liệu từ PostgreSQL',
-    });
+    res.status(500).json({ success: false, error: err.message || 'Lỗi khi làm mới PostgreSQL' });
   }
 });
 
@@ -928,39 +943,14 @@ async function initDatabaseAndPlaces() {
   try {
     const stats = await getDbStats();
     datasetStatus.database = stats;
-
     if (stats.connected && stats.totalPlaces > 0) {
-      console.log(`[Postgres] Đang nạp ${stats.totalPlaces} địa điểm từ Cloud SQL Postgres...`);
-      const dbPlaces = await loadAllPlacesFromDb();
-      if (dbPlaces.length > 0) {
-        spatialIndex.setPlaces(dbPlaces);
-        datasetStatus = {
-          sourceName: 'PostgreSQL Database (Cloud SQL)',
-          sourceType: 'postgres',
-          uploadedAt: new Date().toISOString(),
-          stats: {
-            totalEntities: dbPlaces.length,
-            buildings: dbPlaces.filter((p) => p.placeType === 'building' || p.adminLevel === 'building').length,
-            countries: dbPlaces.filter((p) => p.adminLevel === 2).length,
-            provinces: dbPlaces.filter((p) => p.adminLevel === 4).length,
-            districts: dbPlaces.filter((p) => p.adminLevel === 6).length,
-            wards: dbPlaces.filter((p) => p.adminLevel === 8).length,
-            pois: dbPlaces.filter((p) => p.adminLevel === 'poi' || p.placeType === 'poi').length,
-          },
-          sampleCoordinates: datasetStatus.sampleCoordinates,
-          database: stats,
-        };
-        console.log(`[Postgres] Khởi tạo thành công: Đã nạp ${dbPlaces.length} địa điểm từ Postgres vào Spatial Index!`);
-        return;
-      }
-    }
-
-    if (stats.connected && stats.totalPlaces === 0) {
-      console.log('[Postgres] Cơ sở dữ liệu trống. Đang nạp dữ liệu chuẩn Việt Nam vào Postgres...');
+      datasetStatus.sourceName = 'PostgreSQL Database (viewport queries)';
+      datasetStatus.sourceType = 'postgres';
+      datasetStatus.stats.totalEntities = stats.totalPlaces;
+      console.log(`[Postgres] Sẵn sàng truy vấn theo viewport: ${stats.totalPlaces} địa điểm (không preload RAM).`);
+    } else if (stats.connected) {
       await savePlacesToDb(defaultPlaces, 'default_seed', 'vietnam_default_dataset.json');
-      const updated = await getDbStats();
-      datasetStatus.database = updated;
-      console.log(`[Postgres] Đã lưu thành công ${defaultPlaces.length} địa điểm vào Postgres.`);
+      datasetStatus.database = await getDbStats();
     }
   } catch (err) {
     console.warn('[Postgres] Khởi tạo Postgres hoãn lại hoặc chưa sẵn sàng:', err);

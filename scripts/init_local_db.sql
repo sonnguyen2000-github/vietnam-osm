@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS osm_places (
 CREATE INDEX IF NOT EXISTS idx_osm_places_bbox 
     ON osm_places (min_lon, max_lon, min_lat, max_lat);
 
+-- B-tree indexes used by viewport intersection queries.
+CREATE INDEX IF NOT EXISTS idx_osm_places_min_lon ON osm_places (min_lon);
+CREATE INDEX IF NOT EXISTS idx_osm_places_max_lon ON osm_places (max_lon);
+CREATE INDEX IF NOT EXISTS idx_osm_places_min_lat ON osm_places (min_lat);
+CREATE INDEX IF NOT EXISTS idx_osm_places_max_lat ON osm_places (max_lat);
+CREATE INDEX IF NOT EXISTS idx_osm_places_level_bbox
+    ON osm_places (admin_level, min_lon, max_lon, min_lat, max_lat);
+
 CREATE INDEX IF NOT EXISTS idx_osm_places_center 
     ON osm_places (center_lat, center_lon);
 

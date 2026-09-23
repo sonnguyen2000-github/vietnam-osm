@@ -337,10 +337,6 @@ export class SpatialIndex {
         }
       }
 
-      // Add nearest building to places as the most granular entity
-      if (nearestBuildingPlace) {
-        containingPlaces.push(nearestBuildingPlace);
-      }
     }
 
     // Sort containing places by priority rank
@@ -378,6 +374,8 @@ export class SpatialIndex {
         hierarchy.country = p;
       }
     }
+    // A fallback is useful for navigation, but it is not a containing boundary.
+    if (!hierarchy.building && nearestBuildingPlace) hierarchy.building = nearestBuildingPlace;
 
     // Associate closest POI if within 25m or top nearby POI
     if (nearbyPois.length > 0 && (nearbyPois[0].distanceMeters || 0) <= 30) {
@@ -386,7 +384,7 @@ export class SpatialIndex {
 
     // Build human-friendly administrative path
     const fullPath: string[] = [];
-    if (hierarchy.building) fullPath.push(hierarchy.building.name);
+    if (hierarchy.building?.isContained) fullPath.push(hierarchy.building.name);
     if (hierarchy.ward) fullPath.push(hierarchy.ward.name);
     if (hierarchy.district) fullPath.push(hierarchy.district.name);
     if (hierarchy.province) fullPath.push(hierarchy.province.name);
@@ -400,14 +398,14 @@ export class SpatialIndex {
         lon,
         order,
       },
-      totalFound: containingPlaces.length + nearbyPois.length,
+      totalFound: containingPlaces.length + nearbyPois.length + (nearestBuildingPlace ? 1 : 0),
       totalContained: totalContainedCount,
       totalNearby: nearbyPois.length,
       hierarchy,
       fullPath,
       places: containingPlaces,
       nearbyPois,
-      allMatches: [...containingPlaces, ...nearbyPois],
+      allMatches: [...containingPlaces, ...nearbyPois, ...(nearestBuildingPlace ? [nearestBuildingPlace] : [])],
       executionTimeMs: Date.now() - startTime,
     };
   }

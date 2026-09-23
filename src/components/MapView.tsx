@@ -16,10 +16,12 @@ import {
   Satellite,
   Map as MapIcon,
   Check,
+  LocateFixed,
+  LoaderCircle,
 } from 'lucide-react';
 
 interface MapViewProps {
-  places: OSMPlace[];
+  dataVersion?: string;
   activeCoord: { lat: number; lon: number } | null;
   onMapClick: (lat: number, lon: number) => void;
   highlightedPlaces: OSMPlace[];
@@ -76,7 +78,7 @@ const BASEMAP_CONFIGS: Record<
 };
 
 export const MapView: React.FC<MapViewProps> = ({
-  places,
+  dataVersion,
   activeCoord,
   onMapClick,
   highlightedPlaces,
@@ -88,12 +90,17 @@ export const MapView: React.FC<MapViewProps> = ({
   const mapInstanceRef = useRef<L.Map | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
+  const locationAccuracyRef = useRef<L.Circle | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
+  const [places, setPlaces] = useState<OSMPlace[]>([]);
   const geojsonLayersRef = useRef<{ [key: string]: L.GeoJSON | L.LayerGroup }>({});
   const highlightLayerGroupRef = useRef<L.LayerGroup | null>(null);
 
   // Basemap state
   const [currentBasemap, setCurrentBasemap] = useState<BasemapType>('voyager');
   const [showBasemapMenu, setShowBasemapMenu] = useState(false);
+  const [isLocating, setIsLocating] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
 
   // Layer visibility toggles
   const [visibleLayers, setVisibleLayers] = useState<{
@@ -145,6 +152,35 @@ export const MapView: React.FC<MapViewProps> = ({
     highlightLayerGroupRef.current = L.layerGroup().addTo(map);
     mapInstanceRef.current = map;
 
+    let fetchTimer: ReturnType<typeof setTimeout> | undefined;
+    const loadViewport = () => {
+      if (fetchTimer) clearTimeout(fetchTimer);
+      fetchTimer = setTimeout(async () => {
+        const bounds = map.getBounds();
+        const zoom = map.getZoom();
+        requestRef.current?.abort();
+        const controller = new AbortController();
+        requestRef.current = controller;
+        const params = new URLSearchParams({
+          min_lon: String(bounds.getWest()), min_lat: String(bounds.getSouth()),
+          max_lon: String(bounds.getEast()), max_lat: String(bounds.getNorth()),
+          zoom: String(zoom),
+        });
+        try {
+          const response = await fetch(`/api/layers?${params}`, { signal: controller.signal });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const json = await response.json();
+          setPlaces((json.features || []).map((feature: any) => ({
+            ...feature.properties, geometryType: feature.geometry.type, geometry: feature.geometry,
+          })));
+        } catch (error: any) {
+          if (error.name !== 'AbortError') console.error('Failed to load viewport layers:', error);
+        }
+      }, 180);
+    };
+    map.on('moveend zoomend', loadViewport);
+    loadViewport();
+
     // Handle container resize & invalidation
     const handleResize = () => {
       map.invalidateSize();
@@ -164,10 +200,17 @@ export const MapView: React.FC<MapViewProps> = ({
       clearTimeout(timer1);
       clearTimeout(timer2);
       resizeObserver.disconnect();
+      if (fetchTimer) clearTimeout(fetchTimer);
+      requestRef.current?.abort();
+      map.off('moveend zoomend', loadViewport);
       map.remove();
       mapInstanceRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (mapInstanceRef.current && dataVersion) mapInstanceRef.current.fire('moveend');
+  }, [dataVersion]);
 
   // Update Basemap when changed
   useEffect(() => {
@@ -261,7 +304,7 @@ export const MapView: React.FC<MapViewProps> = ({
         level4Places.push(p);
       } else if (p.adminLevel === 6) {
         level6Places.push(p);
-      } else if (p.adminLevel === 8) {
+      } else if (p.adminLevel === 8 || p.adminLevel === 9 || p.adminLevel === 10 || p.adminLevel === 'street') {
         level8Places.push(p);
       } else if (p.adminLevel === 'poi' || p.placeType === 'poi') {
         poiPlaces.push(p);
@@ -577,12 +620,75 @@ export const MapView: React.FC<MapViewProps> = ({
     mapInstanceRef.current?.setView([16.0, 107.5], 6);
   };
 
+  const showMyLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      setLocationError('Trình duyệt này không hỗ trợ định vị.');
+      return;
+    }
+
+    setIsLocating(true);
+    setLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        const map = mapInstanceRef.current;
+        if (!map) return;
+        const latLng: L.LatLngExpression = [coords.latitude, coords.longitude];
+
+        if (locationAccuracyRef.current) {
+          locationAccuracyRef.current.setLatLng(latLng).setRadius(coords.accuracy);
+        } else {
+          locationAccuracyRef.current = L.circle(latLng, {
+            radius: coords.accuracy,
+            color: '#38bdf8',
+            fillColor: '#38bdf8',
+            fillOpacity: 0.12,
+            weight: 1.5,
+            interactive: false,
+          }).addTo(map);
+        }
+
+        map.flyTo(latLng, Math.max(map.getZoom(), 17), { duration: 1.1 });
+        onMapClick(coords.latitude, coords.longitude);
+        setIsLocating(false);
+      },
+      (error) => {
+        const messages: Record<number, string> = {
+          1: 'Bạn chưa cấp quyền truy cập vị trí.',
+          2: 'Không xác định được vị trí hiện tại.',
+          3: 'Yêu cầu định vị đã hết thời gian.',
+        };
+        setLocationError(messages[error.code] || 'Không thể lấy vị trí hiện tại.');
+        setIsLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
+    );
+  }, [onMapClick]);
+
   return (
     <div className="relative w-full h-full min-h-[520px] flex-1 bg-neutral-950 overflow-hidden rounded-2xl border border-neutral-800 shadow-xl flex flex-col">
+      {locationError && (
+        <div className="absolute top-14 left-3 z-[500] max-w-xs rounded-lg border border-red-400/40 bg-red-950/90 px-3 py-2 text-xs text-red-100 shadow-lg backdrop-blur">
+          {locationError}
+        </div>
+      )}
+
       {/* Top Floating Control Bar */}
       <div className="absolute top-3 left-3 right-3 z-10 flex items-center justify-between pointer-events-none gap-2">
         {/* Left Quick Navigation Actions */}
         <div className="flex items-center gap-1.5 pointer-events-auto flex-wrap">
+          <button
+            id="btn-my-location"
+            onClick={showMyLocation}
+            disabled={isLocating}
+            title="Hiện vị trí hiện tại của tôi"
+            className="flex items-center gap-1.5 bg-sky-500/90 hover:bg-sky-400 disabled:opacity-60 text-white px-2.5 py-1.5 rounded-xl border border-sky-300/40 backdrop-blur shadow-md text-xs font-medium transition-all"
+          >
+            {isLocating
+              ? <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+              : <LocateFixed className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{isLocating ? 'Đang định vị…' : 'Vị trí của tôi'}</span>
+          </button>
+
           <button
             id="btn-reset-map-view"
             onClick={resetViewVietnam}

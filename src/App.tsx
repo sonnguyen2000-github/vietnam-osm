@@ -14,7 +14,6 @@ import { DatasetStatus, ReverseGeocodeResult, OSMPlace } from './types';
 export default function App() {
   const [activeTab, setActiveTab] = useState<'map' | 'api' | 'upload'>('map');
   const [status, setStatus] = useState<DatasetStatus | null>(null);
-  const [places, setPlaces] = useState<OSMPlace[]>([]);
   const [currentCoords, setCurrentCoords] = useState<{ lat: number; lon: number }>({
     lat: 21.0287,
     lon: 105.8524,
@@ -24,35 +23,16 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
 
-  // Fetch status and layers on mount
-  const fetchStatusAndLayers = async () => {
+  // Fetch lightweight metadata only. Map layers are loaded by viewport in MapView.
+  const fetchStatus = async () => {
     try {
-      const [statusRes, layersRes] = await Promise.all([
-        fetch('/api/status'),
-        fetch('/api/layers'),
-      ]);
-
+      const statusRes = await fetch('/api/status');
       if (statusRes.ok) {
-        const sJson = await statusRes.json();
-        if (sJson.success) {
-          setStatus(sJson.data);
-        }
-      }
-
-      if (layersRes.ok) {
-        const lJson = await layersRes.json();
-        if (lJson.features) {
-          // Convert FeatureCollection to OSMPlace list for MapView
-          const parsedPlaces: OSMPlace[] = lJson.features.map((f: any) => ({
-            ...f.properties,
-            geometryType: f.geometry.type,
-            geometry: f.geometry,
-          }));
-          setPlaces(parsedPlaces);
-        }
+        const json = await statusRes.json();
+        if (json.success) setStatus(json.data);
       }
     } catch (err) {
-      console.error('Failed to fetch initial status or layers:', err);
+      console.error('Failed to fetch dataset status:', err);
     }
   };
 
@@ -91,7 +71,7 @@ export default function App() {
       const json = await res.json();
       if (json.success && json.dataset) {
         setStatus(json.dataset);
-        await fetchStatusAndLayers();
+        await fetchStatus();
         // Re-query current coordinates
         handleSearch(currentCoords.lat, currentCoords.lon);
       }
@@ -103,7 +83,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchStatusAndLayers();
+    fetchStatus();
     // Run initial search for default coordinate
     handleSearch(21.0287, 105.8524, 'narrow_to_broad');
   }, []);
@@ -125,7 +105,7 @@ export default function App() {
           <div className="flex-1 flex flex-col lg:flex-row gap-4 h-[calc(100vh-80px)] min-h-[600px]">
             {/* Visual Map Component */}
             <MapView
-              places={places}
+              dataVersion={status?.uploadedAt}
               activeCoord={currentCoords}
               onMapClick={handleMapClick}
               highlightedPlaces={currentResult?.places || []}
@@ -158,7 +138,7 @@ export default function App() {
               status={status}
               onUploadSuccess={(newStatus) => {
                 setStatus(newStatus);
-                fetchStatusAndLayers();
+                fetchStatus();
                 handleSearch(currentCoords.lat, currentCoords.lon);
               }}
               onResetDefault={handleResetDefault}

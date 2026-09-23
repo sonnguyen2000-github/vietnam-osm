@@ -1,7 +1,41 @@
-import { count, desc, sql } from 'drizzle-orm';
+import { and, asc, count, desc, inArray, lte, gte, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import { osmPlaces, importLogs } from './schema.ts';
 import { OSMPlace } from '../../server/types.ts';
+
+function rowToPlace(row: typeof osmPlaces.$inferSelect): OSMPlace {
+  return {
+    id: row.id, osmId: Number(row.osmId), osmType: row.osmType as OSMPlace['osmType'],
+    name: row.name, nameVi: row.nameVi || undefined, nameEn: row.nameEn || undefined,
+    adminLevel: isNaN(Number(row.adminLevel)) ? row.adminLevel : Number(row.adminLevel),
+    adminLevelLabel: row.adminLevelLabel, priorityRank: row.placeType === 'building' ? 0.5 : row.priorityRank,
+    placeType: row.placeType as OSMPlace['placeType'], tags: (row.tags as Record<string, string>) || {},
+    bbox: { minLon: row.minLon, minLat: row.minLat, maxLon: row.maxLon, maxLat: row.maxLat },
+    center: [row.centerLon, row.centerLat], geometryType: row.geometryType as OSMPlace['geometryType'],
+    geometry: row.geometry as OSMPlace['geometry'], areaApproxKm2: row.areaApproxKm2 ?? undefined,
+  };
+}
+
+export interface PlacesBboxQuery {
+  minLon: number; minLat: number; maxLon: number; maxLat: number;
+  adminLevels?: string[]; limit?: number; orderFrom?: { lon: number; lat: number };
+}
+
+export async function getPlacesByBbox(query: PlacesBboxQuery): Promise<OSMPlace[]> {
+  const conditions = [
+    lte(osmPlaces.minLon, query.maxLon), gte(osmPlaces.maxLon, query.minLon),
+    lte(osmPlaces.minLat, query.maxLat), gte(osmPlaces.maxLat, query.minLat),
+  ];
+  if (query.adminLevels?.length) conditions.push(inArray(osmPlaces.adminLevel, query.adminLevels));
+  const rows = await db.select().from(osmPlaces).where(and(...conditions))
+    .orderBy(
+      ...(query.orderFrom
+        ? [sql`power(${osmPlaces.centerLon} - ${query.orderFrom.lon}, 2) + power(${osmPlaces.centerLat} - ${query.orderFrom.lat}, 2)`]
+        : [asc(osmPlaces.priorityRank), asc(osmPlaces.id)])
+    )
+    .limit(Math.min(Math.max(query.limit ?? 5000, 1), 10000));
+  return rows.map(rowToPlace);
+}
 
 /**
  * Check if the database has any OSM places stored
@@ -13,41 +47,6 @@ export async function getStoredPlacesCount(): Promise<number> {
   } catch (error) {
     console.error('Failed to get stored places count from Postgres:', error);
     return 0;
-  }
-}
-
-/**
- * Load all places from PostgreSQL database into OSMPlace[]
- */
-export async function loadAllPlacesFromDb(): Promise<OSMPlace[]> {
-  try {
-    const rows = await db.select().from(osmPlaces);
-    return rows.map((row) => ({
-      id: row.id,
-      osmId: Number(row.osmId),
-      osmType: row.osmType as 'relation' | 'way' | 'node',
-      name: row.name,
-      nameVi: row.nameVi || undefined,
-      nameEn: row.nameEn || undefined,
-      adminLevel: isNaN(Number(row.adminLevel)) ? row.adminLevel : Number(row.adminLevel),
-      adminLevelLabel: row.adminLevelLabel,
-      priorityRank: row.placeType === 'building' ? 0.5 : row.priorityRank,
-      placeType: row.placeType as any,
-      tags: (row.tags as Record<string, string>) || {},
-      bbox: {
-        minLon: row.minLon,
-        minLat: row.minLat,
-        maxLon: row.maxLon,
-        maxLat: row.maxLat,
-      },
-      center: [row.centerLon, row.centerLat] as [number, number],
-      geometryType: row.geometryType as 'Polygon' | 'MultiPolygon' | 'Point',
-      geometry: row.geometry as any,
-      areaApproxKm2: row.areaApproxKm2 ?? undefined,
-    }));
-  } catch (error) {
-    console.error('Failed to load places from Postgres:', error);
-    throw new Error('Database query failed while loading places.', { cause: error });
   }
 }
 
