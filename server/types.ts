@@ -130,3 +130,21 @@ export interface DatasetStatus {
   lastParseStats?: PBFParseStats;
   database?: DatabaseStatus;
 }
+
+export interface BuildingSelectionRequest {
+  coordinates: [number, number][];
+}
+
+export interface SelectedBuildingPlace extends OSMPlace {
+  coverageRatio: number;
+}
+
+export interface BuildingSelectionData {
+  places: SelectedBuildingPlace[];
+}
+
+export interface BuildingSelectionResult {
+  success: boolean;
+  data?: BuildingSelectionData;
+  error?: string;
+}

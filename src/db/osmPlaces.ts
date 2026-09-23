@@ -1,7 +1,7 @@
-import { and, asc, count, desc, inArray, lte, gte, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, lte, gte, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import { osmPlaces, importLogs } from './schema.ts';
-import { OSMPlace } from '../../server/types.ts';
+import { OSMPlace, BoundingBox } from '../../server/types.ts';
 
 function rowToPlace(row: typeof osmPlaces.$inferSelect): OSMPlace {
   return {
@@ -35,6 +35,47 @@ export async function getPlacesByBbox(query: PlacesBboxQuery): Promise<OSMPlace[
     )
     .limit(Math.min(Math.max(query.limit ?? 5000, 1), 10000));
   return rows.map(rowToPlace);
+}
+
+export interface BuildingCandidatesResult {
+  candidates: OSMPlace[];
+  hasOverflow: boolean;
+  totalFetched: number;
+}
+
+/**
+ * Fetch candidate buildings intersecting selection bbox.
+ * Queries up to limit + 1 to detect candidate overflow without silent truncation.
+ */
+export async function getBuildingCandidatesForBbox(
+  bbox: BoundingBox,
+  limit = 3000
+): Promise<BuildingCandidatesResult> {
+  const conditions = [
+    eq(osmPlaces.placeType, 'building'),
+    inArray(osmPlaces.geometryType, ['Polygon', 'MultiPolygon']),
+    lte(osmPlaces.minLon, bbox.maxLon),
+    gte(osmPlaces.maxLon, bbox.minLon),
+    lte(osmPlaces.minLat, bbox.maxLat),
+    gte(osmPlaces.maxLat, bbox.minLat),
+  ];
+
+  const queryLimit = Math.max(1, limit) + 1;
+  const rows = await db
+    .select()
+    .from(osmPlaces)
+    .where(and(...conditions))
+    .orderBy(asc(osmPlaces.id))
+    .limit(queryLimit);
+
+  const hasOverflow = rows.length > limit;
+  const candidatesRows = hasOverflow ? rows.slice(0, limit) : rows;
+
+  return {
+    candidates: candidatesRows.map(rowToPlace),
+    hasOverflow,
+    totalFetched: rows.length,
+  };
 }
 
 /**

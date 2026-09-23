@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -12,12 +13,45 @@ import { DatasetStatus, PBFParseStats, OSMPlace } from './server/types';
 import {
   getStoredPlacesCount,
   getPlacesByBbox,
+  getBuildingCandidatesForBbox,
   savePlacesToDb,
   getDbStats,
 } from './src/db/osmPlaces.ts';
+import {
+  validateAndNormalizeSelectionPolygon,
+  calculateBuildingSelection,
+  DEFAULT_CANDIDATE_LIMIT,
+} from './server/buildingSelection';
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Route-specific parser for /api/buildings/select with 1MB limit applied BEFORE global 50MB parser
+const buildingSelectionJsonParser = express.json({ limit: '1mb' });
+app.use('/api/buildings/select', (req, res, next) => {
+  const contentLength = req.headers['content-length'];
+  if (contentLength && parseInt(contentLength, 10) > 1024 * 1024) {
+    return res.status(413).json({
+      success: false,
+      error: 'Payload quá lớn: kích thước body cho API lựa chọn tòa nhà không được vượt quá 1MB.',
+    });
+  }
+  buildingSelectionJsonParser(req, res, (err) => {
+    if (err) {
+      if ((err as any).type === 'entity.too.large' || err.status === 413) {
+        return res.status(413).json({
+          success: false,
+          error: 'Payload quá lớn: kích thước body cho API lựa chọn tòa nhà không được vượt quá 1MB.',
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        error: `Dữ liệu JSON không hợp lệ: ${err.message}`,
+      });
+    }
+    next();
+  });
+});
 
 // Middleware for JSON
 app.use(express.json({ limit: '50mb' }));
@@ -289,6 +323,76 @@ app.post('/api/lookup', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error: any) {
     res.status(503).json({ success: false, error: `Không thể truy vấn PostgreSQL: ${error.message}` });
+  }
+});
+
+// POST /api/buildings/select - Smart building selection by polygon coverage ratio
+// Request body: { coordinates: [ [lon, lat], ... ] }
+// Threshold: coverageRatio >= 0.5
+app.post('/api/buildings/select', async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Vui lòng cung cấp body JSON hợp lệ dạng { "coordinates": [[lon, lat], ...] }',
+      });
+    }
+
+    // 1. Validate & normalize input coordinates
+    const validation = validateAndNormalizeSelectionPolygon(body.coordinates);
+    if (!validation.valid) {
+      return res.status(validation.statusCode).json({
+        success: false,
+        error: validation.error,
+      });
+    }
+
+    // 2. Fetch candidates from database with candidateLimit + 1 overflow detection
+    let candidateResult;
+    try {
+      candidateResult = await getBuildingCandidatesForBbox(validation.bbox, DEFAULT_CANDIDATE_LIMIT);
+    } catch (dbError: any) {
+      console.error('PostgreSQL query error in /api/buildings/select:', dbError?.message || dbError);
+      return res.status(503).json({
+        success: false,
+        error: 'Dịch vụ cơ sở dữ liệu tạm thời không khả dụng. Vui lòng thử lại sau.',
+      });
+    }
+
+    // Candidate overflow check (returns 422 to require smaller selection area)
+    if (candidateResult.hasOverflow) {
+      return res.status(422).json({
+        success: false,
+        error: `Vùng chọn chứa quá nhiều tòa nhà ứng viên (> ${DEFAULT_CANDIDATE_LIMIT}). Vui lòng thu nhỏ vùng chọn để tiếp tục.`,
+      });
+    }
+
+    // 3. Calculate spatial intersection and building coverage
+    let selectedPlaces;
+    try {
+      selectedPlaces = calculateBuildingSelection(validation.ring, candidateResult.candidates);
+    } catch (geoError: any) {
+      console.error('Geometric computation error in /api/buildings/select:', geoError?.message || geoError);
+      return res.status(500).json({
+        success: false,
+        error: 'Đã xảy ra lỗi trong quá trình tính toán không gian nội bộ.',
+      });
+    }
+
+    // 4. Return successful response with original geometries and coverageRatio
+    return res.json({
+      success: true,
+      data: {
+        places: selectedPlaces,
+      },
+    });
+  } catch (err: any) {
+    console.error('Unexpected error in /api/buildings/select:', err?.message || err);
+    return res.status(500).json({
+      success: false,
+      error: 'Đã xảy ra lỗi máy chủ nội bộ.',
+    });
   }
 });
 
@@ -983,4 +1087,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+export { app, startServer };
