@@ -1,0 +1,87 @@
+{
+  "entities": {
+    "Bookmark": {
+      "title": "Bookmark",
+      "description": "A saved coordinate or location bookmarked by a user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lon": {
+          "type": "number"
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "name", "lat", "lon", "createdAt"]
+    },
+    "SearchHistory": {
+      "title": "SearchHistory",
+      "description": "A past reverse geocode search query performed by a user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lon": {
+          "type": "number"
+        },
+        "formattedAddress": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "lat", "lon", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/bookmarks/{bookmarkId}": {
+      "schema": {
+        "$ref": "#/entities/Bookmark"
+      },
+      "description": "User saved locations and bookmarked coordinates"
+    },
+    "/users/{userId}/history/{historyId}": {
+      "schema": {
+        "$ref": "#/entities/SearchHistory"
+      },
+      "description": "User reverse geocoding search history"
+    }
+  }
+}

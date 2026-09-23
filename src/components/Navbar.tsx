@@ -1,6 +1,23 @@
-import React from 'react';
-import { MapPin, Layers, Code, UploadCloud, RefreshCw, Database, ExternalLink } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  MapPin,
+  Layers,
+  Code,
+  UploadCloud,
+  RefreshCw,
+  Database,
+  LogIn,
+  LogOut,
+  User as UserIcon,
+} from 'lucide-react';
 import { DatasetStatus } from '../types';
+import { auth, googleAuthProvider } from '../lib/firebase';
+import {
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  User,
+} from 'firebase/auth';
 
 interface NavbarProps {
   activeTab: 'map' | 'api' | 'upload';
@@ -8,6 +25,7 @@ interface NavbarProps {
   status: DatasetStatus | null;
   onResetDefault: () => void;
   isResetting: boolean;
+  currentUser?: User | null;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -17,6 +35,35 @@ export const Navbar: React.FC<NavbarProps> = ({
   onResetDefault,
   isResetting,
 }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleLogin = async () => {
+    try {
+      setIsAuthenticating(true);
+      await signInWithPopup(auth, googleAuthProvider);
+    } catch (error) {
+      console.error('Login error:', error);
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+  };
+
   return (
     <header className="bg-neutral-900/90 backdrop-blur border-b border-neutral-800 sticky top-0 z-30 px-4 py-2.5">
       <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
@@ -44,7 +91,10 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="hidden lg:flex items-center gap-2 bg-neutral-800/80 px-3 py-1.5 rounded-lg border border-neutral-750 text-xs">
           <Database className="w-3.5 h-3.5 text-emerald-400" />
           <span className="text-neutral-400">Nguồn:</span>
-          <span className="text-neutral-200 font-medium max-w-[180px] truncate" title={status?.sourceName}>
+          <span
+            className="text-neutral-200 font-medium max-w-[180px] truncate"
+            title={status?.sourceName}
+          >
             {status?.sourceType === 'postgres'
               ? 'PostgreSQL (Cloud SQL)'
               : status?.sourceType === 'uploaded_pbf'
@@ -55,7 +105,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             {status?.stats.totalEntities || 0} đối tượng
           </span>
           {status?.database?.connected && (
-            <span className="bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 font-mono text-[11px] px-1.5 py-0.5 rounded flex items-center gap-1" title="Dữ liệu được lưu bền vững vào PostgreSQL">
+            <span
+              className="bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 font-mono text-[11px] px-1.5 py-0.5 rounded flex items-center gap-1"
+              title="Dữ liệu được lưu bền vững vào PostgreSQL"
+            >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
               Postgres
             </span>
@@ -127,15 +180,43 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          <button
-            id="btn-open-standalone-tab"
-            onClick={() => window.open(window.location.href, '_blank')}
-            title="Mở ứng dụng độc lập trong Tab mới (vượt qua hạn chế Cookie bên thứ 3 của iFrame)"
-            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-amber-400 text-xs border border-neutral-700 transition-colors"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Mở tab mới</span>
-          </button>
+          {/* User Authentication Pill / Button */}
+          {user ? (
+            <div className="flex items-center gap-2 bg-neutral-800/90 border border-neutral-700 px-2.5 py-1.5 rounded-xl">
+              {user.photoURL ? (
+                <img
+                  src={user.photoURL}
+                  alt={user.displayName || 'User'}
+                  className="w-5 h-5 rounded-full border border-neutral-600 object-cover"
+                />
+              ) : (
+                <div className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-300 flex items-center justify-center text-[10px] font-bold">
+                  {user.displayName ? user.displayName[0].toUpperCase() : 'U'}
+                </div>
+              )}
+              <span className="text-xs text-neutral-200 font-medium max-w-[100px] truncate hidden sm:inline">
+                {user.displayName || user.email?.split('@')[0]}
+              </span>
+              <button
+                id="btn-logout"
+                onClick={handleLogout}
+                title="Đăng xuất"
+                className="text-neutral-400 hover:text-red-400 p-0.5 rounded transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              id="btn-login"
+              onClick={handleLogin}
+              disabled={isAuthenticating}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-750 text-neutral-200 text-xs font-medium border border-neutral-700 hover:border-amber-500/50 transition-all shadow-sm"
+            >
+              <LogIn className="w-3.5 h-3.5 text-amber-400" />
+              <span>Đăng nhập</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

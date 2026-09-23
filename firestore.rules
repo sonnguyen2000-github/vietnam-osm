@@ -1,0 +1,78 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default deny all unhandled paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health / connection test document
+    match /test/connection {
+      allow get: if true;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidBookmark(data, userId) {
+      return data.keys().hasAll(['id', 'userId', 'name', 'lat', 'lon', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'name', 'lat', 'lon', 'address', 'createdAt']) &&
+             data.id is string && isValidId(data.id) &&
+             data.userId == userId &&
+             data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
+             data.lat is number && data.lat >= -90.0 && data.lat <= 90.0 &&
+             data.lon is number && data.lon >= -180.0 && data.lon <= 180.0 &&
+             (!('address' in data) || (data.address is string && data.address.size() <= 500)) &&
+             data.createdAt == request.time;
+    }
+
+    function isValidSearchHistory(data, userId) {
+      return data.keys().hasAll(['id', 'userId', 'lat', 'lon', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'lat', 'lon', 'formattedAddress', 'createdAt']) &&
+             data.id is string && isValidId(data.id) &&
+             data.userId == userId &&
+             data.userId == request.auth.uid &&
+             data.lat is number && data.lat >= -90.0 && data.lat <= 90.0 &&
+             data.lon is number && data.lon >= -180.0 && data.lon <= 180.0 &&
+             (!('formattedAddress' in data) || (data.formattedAddress is string && data.formattedAddress.size() <= 500)) &&
+             data.createdAt == request.time;
+    }
+
+    match /users/{userId}/bookmarks/{bookmarkId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(bookmarkId) && incoming().id == bookmarkId && isValidBookmark(incoming(), userId);
+      allow update: if isOwner(userId) && isValidId(bookmarkId) && isValidBookmark(incoming(), userId) &&
+                       incoming().id == existing().id &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'address']);
+      allow delete: if isOwner(userId) && isValidId(bookmarkId);
+    }
+
+    match /users/{userId}/history/{historyId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(historyId) && incoming().id == historyId && isValidSearchHistory(incoming(), userId);
+      allow update: if false;
+      allow delete: if isOwner(userId) && isValidId(historyId);
+    }
+  }
+}

@@ -1033,6 +1033,39 @@ app.post('/api/database/reload', async (_req, res) => {
   }
 });
 
+// POST /api/sync-batch - Batch sync places directly from local script or local PostgreSQL
+app.post('/api/sync-batch', async (req, res) => {
+  try {
+    const { places, source, filename } = req.body;
+    if (!Array.isArray(places) || places.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Body phải chứa mảng "places" với ít nhất 1 địa điểm.',
+      });
+    }
+
+    const saveResult = await savePlacesToDb(places, source || 'local_db_sync', filename || 'api_batch_sync');
+    const dbStats = await getDbStats();
+    datasetStatus.database = dbStats;
+    datasetStatus.stats.totalEntities = dbStats.totalPlaces;
+    datasetStatus.sourceName = 'PostgreSQL Database (viewport queries)';
+    datasetStatus.sourceType = 'postgres';
+
+    res.json({
+      success: true,
+      message: `Đã đồng bộ thành công ${saveResult.saved}/${places.length} bản ghi vào PostgreSQL.`,
+      batchSaved: saveResult.saved,
+      totalInDatabase: dbStats.totalPlaces,
+    });
+  } catch (err: any) {
+    console.error('Error in /api/sync-batch:', err);
+    res.status(500).json({
+      success: false,
+      error: `Lỗi khi lưu dữ liệu vào PostgreSQL: ${err.message || err.toString()}`,
+    });
+  }
+});
+
 // Global Error Handler to guarantee JSON responses
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('Unhandled server error:', err);
