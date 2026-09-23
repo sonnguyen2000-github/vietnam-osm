@@ -1,0 +1,6 @@
+{
+  "name": "OSM Vietnam Hierarchy & Reverse Geocoder",
+  "description": "API tra cứu địa điểm và phân cấp hành chính Việt Nam theo toạ độ từ file OpenStreetMap (PBF) kèm bản đồ tương tác và công cụ cập nhật dữ liệu.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
